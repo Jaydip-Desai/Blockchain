@@ -1,109 +1,98 @@
 import json
-
-from web3 import Web3
-
-# In the video, we forget to `install_solc`
-# from solcx import compile_standard
-from solcx import compile_standard, install_solc
 import os
 from dotenv import load_dotenv
-from web3.middleware import geth_poa_middleware
+from web3 import Web3
+from web3.middleware.proof_of_authority import ExtraDataToPOAMiddleware
+from solcx import compile_standard, install_solc
 
+# Load environment variables (if needed)
 load_dotenv()
 
-
+# Read Solidity source code
 with open("./SimpleStorage.sol", "r") as file:
     simple_storage_file = file.read()
 
-# We add these two lines that we forgot from the video!
-print("Installing...")
+# Install Solidity compiler
+print("Installing Solidity compiler...")
 install_solc("0.6.0")
 
-# Solidity source code
+# Compile Solidity contract
 compiled_sol = compile_standard(
     {
         "language": "Solidity",
         "sources": {"SimpleStorage.sol": {"content": simple_storage_file}},
         "settings": {
             "outputSelection": {
-                "*": {
-                    "*": ["abi", "metadata", "evm.bytecode", "evm.bytecode.sourceMap"]
-                }
+                "*": {"*": ["abi", "metadata", "evm.bytecode", "evm.bytecode.sourceMap"]}
             }
         },
     },
     solc_version="0.6.0",
 )
 
+# Save compiled output
 with open("compiled_code.json", "w") as file:
     json.dump(compiled_sol, file)
 
-# get bytecode
-bytecode = compiled_sol["contracts"]["SimpleStorage.sol"]["SimpleStorage"]["evm"][
-    "bytecode"
-]["object"]
+# Extract bytecode and ABI
+bytecode = compiled_sol["contracts"]["SimpleStorage.sol"]["SimpleStorage"]["evm"]["bytecode"]["object"]
+abi = json.loads(compiled_sol["contracts"]["SimpleStorage.sol"]["SimpleStorage"]["metadata"])["output"]["abi"]
 
-# get abi
-abi = json.loads(
-    compiled_sol["contracts"]["SimpleStorage.sol"]["SimpleStorage"]["metadata"]
-)["output"]["abi"]
+# --- Setup blockchain connection ---
+# Local Ganache (default)
+w3 = Web3(Web3.HTTPProvider("http://127.0.0.1:7545"))
+chain_id = 1337  # Ganache default
 
-# w3 = Web3(Web3.HTTPProvider(os.getenv("SEPOLIA_RPC_URL")))
-# chain_id = 4
-#
-# For connecting to ganache
-w3 = Web3(Web3.HTTPProvider("HTTP://127.0.0.1:7545"))
-chain_id = 1337
+# Inject POA middleware for compatible networks (optional for Ganache)
+w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)
 
-if chain_id == 4:
-    w3.middleware_onion.inject(geth_poa_middleware, layer=0)
-    print(w3.clientVersion)
-#Added print statement to ensure connection suceeded as per
-#https://web3py.readthedocs.io/en/stable/middleware.html#geth-style-proof-of-authority
+if not w3.is_connected():
+    raise Exception("Web3 is not connected to blockchain!")
 
-my_address = "0x6d10d6Da2cb606adE7bDa4e7af18Fdf15cE85f57"
-private_key = "0xe27d49df4709a37baedde99c8957a75e0bc6150e6f6d03af9a24a0b23bb4a45d"
+print("Connected to blockchain")
 
-# Create the contract in Python
+# --- Your account details ---
+my_address = "0xf4aBD9c6082B80429f55979E67069F1338D37c2e"
+private_key = "0xc4fbda1e40db556697d9c199d57031ba50a08b4911fc3d3e96d25f0bbd2c016e"
+
+# --- Deploy the contract ---
 SimpleStorage = w3.eth.contract(abi=abi, bytecode=bytecode)
-# Get the latest transaction
 nonce = w3.eth.get_transaction_count(my_address)
-# Submit the transaction that deploys the contract
-transaction = SimpleStorage.constructor().build_transaction(
-    {
-        "chainId": chain_id,
-        "gasPrice": w3.eth.gas_price,
-        "from": my_address,
-        "nonce": nonce,
-    }
-)
-# Sign the transaction
+
+transaction = SimpleStorage.constructor().build_transaction({
+    "chainId": chain_id,
+    "from": my_address,
+    "nonce": nonce,
+    "gasPrice": w3.eth.gas_price,
+})
+
+# Sign + send
 signed_txn = w3.eth.account.sign_transaction(transaction, private_key=private_key)
-print("Deploying Contract!")
-# Send it!
+print("Deploying contract...")
 tx_hash = w3.eth.send_raw_transaction(signed_txn.raw_transaction)
-# Wait for the transaction to be mined, and get the transaction receipt
-print("Waiting for transaction to finish...")
+
+print("Waiting for deployment...")
 tx_receipt = w3.eth.wait_for_transaction_receipt(tx_hash)
-print(f"Done! Contract deployed to {tx_receipt.contractAddress}")
+print(f"Contract deployed at: {tx_receipt.contractAddress}")
 
-
-# Working with deployed Contracts
+# --- Interact with deployed contract ---
 simple_storage = w3.eth.contract(address=tx_receipt.contractAddress, abi=abi)
-print(f"Initial Stored Value {simple_storage.functions.retrieve().call()}")
-greeting_transaction = simple_storage.functions.store(15).build_transaction(
-    {
-        "chainId": chain_id,
-        "gasPrice": w3.eth.gas_price,
-        "from": my_address,
-        "nonce": nonce + 1,
-    }
-)
-signed_greeting_txn = w3.eth.account.sign_transaction(
-    greeting_transaction, private_key=private_key
-)
-tx_greeting_hash = w3.eth.send_raw_transaction(signed_greeting_txn.raw_transaction)
-print("Updating stored Value...")
-tx_receipt = w3.eth.wait_for_transaction_receipt(tx_greeting_hash)
 
-print(simple_storage.functions.retrieve().call())
+# Read initial value
+print(f"Initial Stored Value: {simple_storage.functions.retrieve().call()}")
+
+# Send a transaction to update the value
+store_txn = simple_storage.functions.store(15).build_transaction({
+    "chainId": chain_id,
+    "from": my_address,
+    "nonce": nonce + 1,
+    "gasPrice": w3.eth.gas_price,
+})
+
+signed_store_txn = w3.eth.account.sign_transaction(store_txn, private_key=private_key)
+print("Updating stored value...")
+tx_store_hash = w3.eth.send_raw_transaction(signed_store_txn.raw_transaction)
+tx_receipt = w3.eth.wait_for_transaction_receipt(tx_store_hash)
+
+# Verify updated value
+print(f"Updated Stored Value: {simple_storage.functions.retrieve().call()}")
